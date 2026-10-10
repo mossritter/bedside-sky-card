@@ -12,7 +12,7 @@ It shows a big clock over a live sky that follows the real sunrise, sunset and w
 
 How it behaves:
 
-- **Night:** from bedtime until the alarm, the screen goes black with a dim clock.
+- **Night:** from bedtime until the alarm, the screen goes black with a dim clock. Tap once to brighten it and show the lamp, sounds and alarm buttons. Double-tap to leave night mode; after two minutes untouched it goes dark again.
 - **Alarm:** hold the clock to open the alarm.
 - **Forecast:** touch the top of the Today card for the full forecast. It opens as soon as your finger lands, and a swipe that starts there turns the page instead.
 - **Ceiling presets:** hold the ceiling light for its presets (placeholders for now).
