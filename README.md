@@ -14,7 +14,7 @@ How it behaves:
 
 - **Night:** from bedtime until the alarm, the screen goes black with a dim clock.
 - **Alarm:** hold the clock to open the alarm.
-- **Forecast:** tap the top of the Today card for the full forecast.
+- **Forecast:** touch the top of the Today card for the full forecast. It opens as soon as your finger lands, and a swipe that starts there turns the page instead.
 - **Ceiling presets:** hold the ceiling light for its presets (placeholders for now).
 - **Doorbell:** a ring brings up the Front door page for a minute, even at night. A person detected at the door does the same, but only during the day.
 
@@ -101,7 +101,9 @@ Every option can be left out. A page with nothing set up is hidden.
   - The sky moves on every few seconds, and nothing is redrawn for 3 seconds after a touch.
   - Text-only changes don't redraw the sky.
   - When frames are slow, each page and sheet keeps its last frame, so swipes and the forecast show their glass at once. A fresh frame fades in a few seconds later. Pages not opened lately are drawn ahead in the background.
+- **After a reload:** the Figtree font is built into the card, so nothing is fetched and the text never changes font. The last Home frame is kept in the browser and shown straight away, then fades into the live one.
+- **Contrast:** the glass frosts by day and dims at night until the smaller grey text reaches about 4.5:1. Most of the day this changes nothing. At sunrise and golden hour the glass gets a little thicker.
 - **Today's high and low:** these are the highest and lowest seen all day, from the forecast, the readings and HA's history since midnight. Some forecasts (Met.no) only cover the hours left in today, so their high drops through the afternoon.
 - To mute the mic, use a gesture: an automation can toggle `switch.vaca_<device>_mute` on a two-finger swipe down (`event.vaca_<device>_gesture`). One-finger swipes stay free for the pages.
 
-MIT License.
+MIT License. The card includes the [Figtree](https://github.com/erikdkennedy/figtree) font, © 2022 The Figtree Project Authors, under the SIL Open Font License 1.1 (see `FONT-LICENSE`).
