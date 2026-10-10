@@ -1,7 +1,7 @@
-/*! Bedside Sky Card 1.0.0 | a bedside screen for Home Assistant and View Assist, made for the Echo Show 5 (960x480) | MIT License */
+/*! Bedside Sky Card 1.1.0 | a bedside screen for Home Assistant and View Assist, made for the Echo Show 5 (960x480) | MIT License */
 (() => {
 'use strict';
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const FONT_URL = 'https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700&display=swap';
 const STYLE = String.raw`  /* The card: the 960 x 480 screen scaled to fill the card, which keeps a 2:1 shape (full screen on an Echo Show 5). */
   :host { display: block; position: relative; width: 100%; aspect-ratio: 2 / 1; max-height: 100vh; overflow: hidden; background: #000; }
@@ -225,6 +225,10 @@ const STYLE = String.raw`  /* The card: the 960 x 480 screen scaled to fill the 
   .scr.has-alert .toast { top: 92px; }
   #wxPopW { display: inline-flex; align-items: center; gap: 8px; }
   .g[aria-disabled="true"] { cursor: default; }
+  .g { transition: background-color .12s ease; } /* pressed: a light wash on the button itself, no canvas redraw */
+  .g[data-pressed="1"] { background-color: rgba(255,255,255,.16); }
+  .dbg { position: absolute; z-index: 9; right: 8px; bottom: 6px; padding: 3px 9px; border-radius: 9px; font: 600 13px ui-monospace, Menlo, monospace;
+         color: #FFFFFF; background: rgba(0,0,0,.6); pointer-events: none; white-space: nowrap; }
   .cam-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; -webkit-user-drag: none; } /* a drag on the picture still turns the page */
   .cam-wait { position: absolute; left: 0; right: 0; bottom: 22px; text-align: center; font-size: 20px; font-weight: 600; color: rgba(255,255,255,.82); }
   .evs li.none b { font-weight: 500; color: var(--ink2); } /* drop below the alert pill instead of covering it */
@@ -436,6 +440,7 @@ const MARKUP = String.raw`<svg width="0" height="0" style="position:absolute" ar
 
           <ul class="amenu" id="amenu" aria-label="All alerts"></ul>
           <div class="toast" id="toast" role="status"><svg class="i"><use id="toastUse" href="#i-moon"/></svg><span id="toastTxt"></span></div>
+          <div class="dbg" id="dbg" hidden></div>
         </div>
 </div>`;
 
@@ -584,7 +589,7 @@ function mount(root, host, C) {
   function weatherNow() {
     const now = performance.now(), T = WX[state.wx], f = 1 - Math.exp(-(now - coverT) / 900); coverT = now;
     ['cover', 'wet', 'rain'].forEach(k => { state[k] += (T[k] - state[k]) * f; if (Math.abs(T[k] - state[k]) < .004) state[k] = T[k]; });
-    const live = state.liveFreeze ?? (now - T0) / 1000;
+    const live = state.liveFreeze ?? sky.t;
     return { cover: state.cover, wet: state.wet, live, wind: lerp(.35, .8, state.wet), sig: [state.cover, state.wet].map(v => v.toFixed(3)).join(',') + ':' + live.toFixed(2) };
   }
   // 14 clouds, spread evenly across the sky. Each one shows once the cover passes its threshold.
@@ -597,7 +602,7 @@ function mount(root, host, C) {
     }
     return out;
   })();
-  let cloudCv = null;
+  let cloudCv = null, cloudSoft = null;
   const cloudCanvas = (W, H) => (cloudCv && cloudCv.width === W && cloudCv.height === H) ? cloudCv : (cloudCv = makeCanvas(W, H));
   const rgbOf = s => s.match(/[\d.]+/g).slice(0, 3).map(Number);
   const greyMix = (c, k, dk) => { const l = .2126 * c[0] + .7152 * c[1] + .0722 * c[2]; return c.map(v => lerp(v, l, k) * dk); };
@@ -615,9 +620,10 @@ function mount(root, host, C) {
     c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
   }
   function rainFrame(ts) {
+    if (rainDrawn && ts - rainLast < 31) { if (alive) requestAnimationFrame(rainFrame); return; }
     const rc = $('#rain').getContext('2d'), dt = rainLast && !reduceMotion ? Math.min(.05, (ts - rainLast) / 1000) : 0; rainLast = ts;
     const k = state.rain * (state.view === 'night' && state.nightAlpha > .99 ? 0 : 1); // eases in and out with the weather
-    if (k > .01 && !document.hidden) {
+    if (k > .01 && !document.hidden && screenOn()) {
       rc.clearRect(0, 0, 960, 480);
       const lit = smooth(-.15, .2, sunElev(skyM(state.m))), col = [lerp(160, 228, lit), lerp(176, 236, lit), lerp(212, 248, lit)].map(Math.round).join(',');
       const slant = .2; // a little wind from the left
@@ -660,7 +666,7 @@ function mount(root, host, C) {
     const visA = Math.max(lit, .6 * smooth(.15, .7, cov)); // at night only a cloudy sky shows its clouds
     if (visA > .01) {
       // Puffs go on their own layer, which is then softened, so each cloud reads as one shape rather than a stack of discs.
-      const cl = cloudCanvas(W, H), x = cl.getContext('2d'); x.clearRect(0, 0, W, H);
+      const cl = cloudCanvas(W >> 1, H >> 1), x = cl.getContext('2d'); x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, W, H); x.setTransform(.5, 0, 0, .5, 0, 0);
       const big = 1 + .45 * ov, thin = lerp(.55, 1, smooth(.1, .4, cov)), op = lerp(.62, .8, ov), t = wx.live;
       CLOUDS.forEach(c => {
         const a = smooth(c.th, c.th + .08, cov) * visA * thin; if (a <= .01) return;
@@ -680,7 +686,9 @@ function mount(root, host, C) {
           x.fillStyle = cg; x.fillRect(cx - R, cy - R, R * 2, R * 2);
         });
       });
-      ctx.save(); if (canFilter) ctx.filter = `blur(${(4 * KB).toFixed(1)}px)`; ctx.drawImage(cl, 0, 0); ctx.restore();
+      const c2 = cloudSoft || (cloudSoft = makeCanvas(W >> 1, H >> 1)), x2 = c2.getContext('2d'); x2.clearRect(0, 0, c2.width, c2.height);
+      if (canFilter) x2.filter = `blur(${(2 * KB).toFixed(1)}px)`; x2.drawImage(cl, 0, 0); x2.filter = 'none';
+      ctx.drawImage(c2, 0, 0, W, H);
     }
     HILLS.forEach((w, j) => {
       const y0 = w.y * H, a = w.a * k, f = w.f / k;
@@ -717,9 +725,9 @@ function mount(root, host, C) {
   }
   function blurFrom(srcCanvas, srcData, w, h, r, sf) {
     if (!canFilter) return blurRGB(toRGB(srcData), w, h, r);
-    const x = sf.bx; x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, w, h);
-    x.filter = `blur(${Math.sqrt(((2 * r + 1) ** 2 - 1) / 4).toFixed(2)}px)`; x.drawImage(srcCanvas, 0, 0); x.filter = 'none';
-    return toRGB(x.getImageData(0, 0, w, h).data);
+    const hc = sf.h || (sf.h = makeCanvas(w >> 1, h >> 1)), hx = hc.getContext('2d'); hx.clearRect(0, 0, hc.width, hc.height);
+    hx.filter = `blur(${(Math.sqrt(((2 * r + 1) ** 2 - 1) / 4) / 2).toFixed(2)}px)`; hx.drawImage(srcCanvas, 0, 0, hc.width, hc.height); hx.filter = 'none';
+    const out = toRGB(hx.getImageData(0, 0, hc.width, hc.height).data); out.w = hc.width; out.h = hc.height; out.k = .5; return out;
   }
   function sample(buf, w, h, x, y, c) {
     x = Math.min(w - 1.001, Math.max(0, x)); y = Math.min(h - 1.001, Math.max(0, y));
@@ -736,6 +744,7 @@ function mount(root, host, C) {
     const bez = o.bezel, D = o.refract, Lx = -0.55, Ly = -0.835, rimW = o.rimW ?? 2.2;
     const tint = o.tint ?? .12, rim = o.rim ?? .8, sat = o.sat ?? 1.1, edge = o.edge ?? 0, keep = 1 - (o.dim ?? 0);
     const tc = o.tintColor, tm = o.tintMix ?? 0, top = sh.y, hgt = sh.h;
+    const sw = src.w || w, sh2 = src.h || h, sk = src.k || 1, so = sk === 1 ? 0 : -.25; // the blurred sky may be half size
     for (let py = y0; py < y1; py++) {
       const vy = 1 - (py - top) / hgt;
       for (let px = x0; px < x1; px++) {
@@ -750,8 +759,8 @@ function mount(root, host, C) {
         let R, G, B;
         if (f > 0) {
           const ox = nx * D * f, oy = ny * D * f, sx = px - ox, sy = py - oy;
-          R = sample(src, w, h, sx + ox * .1, sy + oy * .1, 0); G = sample(src, w, h, sx, sy, 1); B = sample(src, w, h, sx - ox * .1, sy - oy * .1, 2);
-        } else { const j = (py * w + px) * 3; R = src[j]; G = src[j + 1]; B = src[j + 2]; }
+          R = sample(src, sw, sh2, (sx + ox * .1) * sk + so, (sy + oy * .1) * sk + so, 0); G = sample(src, sw, sh2, sx * sk + so, sy * sk + so, 1); B = sample(src, sw, sh2, (sx - ox * .1) * sk + so, (sy - oy * .1) * sk + so, 2);
+        } else { const j = sk === 1 ? (py * w + px) * 3 : ((py >> 1) * sw + (px >> 1)) * 3; R = src[j]; G = src[j + 1]; B = src[j + 2]; }
         const lum = .2126 * R + .7152 * G + .0722 * B;
         R = lum + (R - lum) * sat; G = lum + (G - lum) * sat; B = lum + (B - lum) * sat;
         if (tc) { R += (tc[0] - R) * tm; G += (tc[1] - G) * tm; B += (tc[2] - B) * tm; }
@@ -801,6 +810,13 @@ function mount(root, host, C) {
     P: null, ink: null, connected: false,
   };
   function save() { try { localStorage.setItem(STORE, JSON.stringify({ days: state.alarm.days, sunrise: state.alarm.sunrise })); } catch (e) {} }
+  // The sky's minute and cloud clock only move on with the live tick, so a redraw for any other reason
+  // (a light changing, the clock's minute, a page's text) finds the same sky and skips the canvas.
+  const sky = { m: null, t: 0 };
+  const advanceSky = () => { sky.m = skyM(state.m); sky.t = (performance.now() - T0) / 1000; };
+  let frameSig = '', lastWall = null;
+  const perf = { full: 0, quick: 0, ms: 0, busy: [], since: 0, long: 0, longMax: 0 };
+  const screenOn = () => { const s = C.screen && st(C.screen); return !s || s.state !== 'off'; };
   // Map the real time of day onto the sky's model day (sunrise at 6:00, sunset at 18:00).
   function skyM(m) {
     const R = state.sun.rise, len = (state.sun.set - R + DAY) % DAY || 720, d = (m - R + DAY) % DAY;
@@ -818,6 +834,8 @@ function mount(root, host, C) {
   /* ---------- DOM ---------- */
   const scr = $('#scr'), bg = $('#bg'), bctx = bg.getContext('2d', { willReadFrequently: true });
   const night = $('#night');
+  const radii = new WeakMap(); // corner radii don't change, so getComputedStyle runs once per element
+  const radiusOf = el => { let r = radii.get(el); if (r == null) { r = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0; radii.set(el, r); } return r; };
 
   // Glass shapes come from the DOM: every visible .g element, measured in screen px.
   function rectOf(el) {
@@ -829,7 +847,7 @@ function mount(root, host, C) {
     const els = $$(`.scr .sb .g, .scr .view:not([hidden]) .g`).filter(el => el.offsetParent !== null && !el.closest('.leaving'));
     return els.map(el => {
       const r = rectOf(el), kind = el.dataset.g || 'glass';
-      return { el, ...r, r: parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0, kind, on: el.dataset.on === '1', pressed: el.dataset.pressed === '1' };
+      return { el, ...r, r: radiusOf(el), kind, on: el.dataset.on === '1', pressed: false };
     }).filter(it => it.kind !== 'thumb' || it.on);
   }
   const inkTextRects = () => $$('.scr .sb .ta, .scr .view:not([hidden]) .ta').filter(el => el.offsetParent !== null && !el.closest('.leaving')).map(rectOf);
@@ -961,19 +979,24 @@ function mount(root, host, C) {
   }
   /* ---------- main render ---------- */
   function render() {
-    const o = state.lay, { W, H } = DIMS[o], P = frameAt(skyM(state.m));
+    if (sky.m == null) advanceSky();
+    const o = state.lay, { W, H } = DIMS[o], P = frameAt(sky.m);
     state.P = P;
     if (bg.width !== W || bg.height !== H) { bg.width = W; bg.height = H; }
     syncText(); updateNight();
     // Deep night: the overlay is solid black, so don't spend anything on the sky.
-    if (state.view === 'night' && state.nightAlpha > .99) { bctx.fillStyle = '#000'; bctx.fillRect(0, 0, W, H); return; }
+    if (state.view === 'night' && state.nightAlpha > .99) { bctx.fillStyle = '#000'; bctx.fillRect(0, 0, W, H); frameSig = ''; return false; }
     const items = collectGlass(); glassNow = items; // the rain layer stays off these
     const moonA = SKYGEO[o].moon, band = [moonA.cx - moonA.rx - 70, moonA.cx + moonA.rx + 70];
     const floor = Math.min(H, ...items.filter(it => !it.el.closest('.sb') && it.x < band[1] && it.x + it.w > band[0]).map(it => it.y));
     const avoid = inkTextRects();
     const wx = weatherNow();
     const geo = { ...SKYGEO[o], moonFloor: floor, avoid, wx, sig: wx.sig + '|' + floor + ':' + avoid.map(r => `${r.x},${r.y},${r.w},${r.h}`).join(';') };
-    const wall = getWall(o, P, skyM(state.m), geo);
+    const wall = getWall(o, P, sky.m, geo); lastWall = wall;
+    // Same sky, same glass, same text boxes: the canvas would come out identical, so only the text was updated.
+    const fsig = sky.m.toFixed(2) + '|' + geo.sig + '#' + items.map(it => `${it.x},${it.y},${it.w},${it.h},${it.kind},${it.on ? 1 : 0}`).join(';');
+    if (fsig === frameSig) { perf.quick++; return false; }
+    frameSig = fsig; perf.full++;
     bctx.putImageData(wall.im, 0, 0);
     // no early return without glass: the day view still needs its ink picked
     bctx.drawImage(shadowLayer(o, items), 0, 0);
@@ -1012,6 +1035,7 @@ function mount(root, host, C) {
     scr.style.setProperty('--alert', ink.light ? '#FF8A8A' : '#C62828');
     scr.style.setProperty('--inv', ink.light ? '#141A2E' : '#FFFFFF');
     scr.style.setProperty('--warn', ink.light ? '255,194,77' : '214,134,10');
+    return true;
   }
   const DAYNAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   function daysLabel() {
@@ -1184,7 +1208,7 @@ function mount(root, host, C) {
 
   // Page changes cross-fade: the old frame (sky and glass) is held on a second canvas and fades out over the new one,
   // while the old page's text slides away and the new page's text slides in.
-  let pageTimer = 0;
+  let pageTimer = 0, glassTimer = 0;
   function goPage(i, dir) {
     if (i < 0 || i >= PAGES.length || i === state.page || state.view !== 'home') return false;
     dir = dir || Math.sign(i - state.page);
@@ -1193,21 +1217,28 @@ function mount(root, host, C) {
     const ov = $('#bg2'), ox = ov.getContext('2d');
     ox.clearRect(0, 0, 960, 480); ox.drawImage(bg, 0, 0);
     ov.style.transition = 'none'; ov.style.opacity = '1';
+    clearTimeout(glassTimer);
+    if (lastWall) { bctx.putImageData(lastWall.im, 0, 0); frameSig = ''; }
     from.classList.add('leaving'); from.style.transition = 'none';
     to.hidden = false; to.style.transition = 'none'; to.style.opacity = '0'; to.style.transform = `translateX(${dir * 36}px)`;
     state.page = i; state.cmenu = false; state.amenu = false; state.touchAt = performance.now();
     if (PAGES[i] === 'cams') camTick(true);
-    render();
+    syncText();
     void to.offsetWidth; // commit the start positions before animating
     const T = 'opacity .3s ease, transform .3s ease';
     to.style.transition = T; to.style.opacity = '1'; to.style.transform = 'none';
     from.style.transition = T; from.style.opacity = '0'; from.style.transform = `translateX(${-dir * 36}px)`;
-    ov.style.transition = 'opacity .3s ease'; ov.style.opacity = '0';
+    ov.style.transition = 'opacity .22s ease'; ov.style.opacity = '0';
+    glassTimer = setTimeout(() => {
+      if (lastWall) { ox.putImageData(lastWall.im, 0, 0); ov.style.transition = 'none'; ov.style.opacity = '1'; }
+      drawFrame();
+      void ov.offsetWidth; ov.style.transition = 'opacity .25s ease'; ov.style.opacity = '0';
+    }, 240);
     pageTimer = setTimeout(() => { from.hidden = true; from.classList.remove('leaving'); from.style.cssText = ''; to.style.cssText = ''; }, 320);
     return true;
   }
   function resetPage() { // instant, used when the screen leaves the day view
-    clearTimeout(pageTimer); state.page = 0;
+    clearTimeout(pageTimer); clearTimeout(glassTimer); state.page = 0;
     $$('.page').forEach(p => { p.hidden = p.dataset.page !== 'home'; p.classList.remove('leaving'); p.style.cssText = ''; });
     $('#bg2').style.opacity = '0';
   }
@@ -1365,7 +1396,7 @@ function mount(root, host, C) {
   const wake = () => { state.wokenUntil = performance.now() + 10000; applyView(); };
   night.addEventListener('click', wake);
   night.addEventListener('keydown', e => { if (e.target === night && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); wake(); } });
-  const press = (el, v) => { if (!el) return; if (v) el.dataset.pressed = '1'; else delete el.dataset.pressed; requestRender(true); };
+  const press = (el, v) => { if (!el) return; if (v) el.dataset.pressed = '1'; else delete el.dataset.pressed; }; // CSS shows it; no redraw
   scr.addEventListener('pointerdown', e => { const t = e.target.closest('.g.tap:not([aria-disabled="true"])') || (e.target.closest('.wxhit') && e.target.closest('.brief')); if (t) { press(t, true); const up = () => { press(t, false); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); }; addEventListener('pointerup', up); addEventListener('pointercancel', up); } });
 
   /* ---------- press and hold ----------
@@ -1445,7 +1476,7 @@ function mount(root, host, C) {
     'hail': ['rain', 'Hail'], 'snowy': ['rain', 'Snow'], 'snowy-rainy': ['rain', 'Sleet'], 'exceptional': ['overcast', 'Unusual weather'],
   };
   const watched = () => [...LIGHTS.flatMap(k => C[k]), C.weather, C.sun, C.alarmTime, C.alarmOn, C.calendar, C.mute, C.temperature, C.humidity,
-    C.laundryDoor, C.washerPower, C.shopping, C.music, C.camera, C.doorbell, C.person, C.volume, C.brightness, C.dnd, C.autoBrightness, C.wakeWord,
+    C.laundryDoor, C.washerPower, C.shopping, C.music, C.camera, C.doorbell, C.person, C.volume, C.brightness, C.dnd, C.autoBrightness, C.wakeWord, C.screen,
     ...C.leaks.map(l => l.entity), ...C.alerts.map(a => a.entity), ...C.cameraEvents.map(e => e.entity)].filter(Boolean);
   // hass changes whenever anything in the house changes; only redraw for what this card shows
   const relevantSig = S => watched().map(id => { const s = S[id]; if (!s) return '-'; const a = s.attributes || {};
@@ -1596,36 +1627,63 @@ function mount(root, host, C) {
   let pending = false;
   function requestRender() {
     if (pending || !alive) return;
-    pending = true; requestAnimationFrame(() => { pending = false; if (alive) render(); });
+    pending = true; requestAnimationFrame(() => { pending = false; if (alive) drawFrame(); });
+  }
+  // Every redraw goes through here so the debug readout can show what it costs.
+  function drawFrame() {
+    const t0 = performance.now(), full = render(), ms = performance.now() - t0;
+    if (full) perf.ms = perf.ms ? perf.ms * .7 + ms * .3 : ms;
+    perf.busy.push([t0, ms]);
+    return full;
   }
 
-  // Live sky: redraw a couple of times a second so the clouds drift and change shape.
-  // Slower when a frame is expensive; idle in deep night or when the screen is hidden.
-  let lastMs = 40, liveTimer = 0;
+  // Live sky: the clouds move on every few seconds (they drift about 20 px a minute, so each step is a pixel or two).
+  // Touch comes first: no sky redraw for a few seconds after a tap or swipe, so nothing waits behind a frame.
+  // Nothing is drawn in deep night, while the page is hidden or while the Echo's screen is off.
+  const TOUCH_HOLD = 3000;
+  let liveTimer = 0;
   function liveTick() {
-    if (!document.hidden && !(state.view === 'night' && state.nightAlpha > .99)) { const t0 = performance.now(); render(); lastMs = performance.now() - t0; }
-    const easing = ['cover', 'wet', 'rain'].some(k => state[k] !== WX[state.wx][k]);
-    if (alive) liveTimer = setTimeout(liveTick, easing ? 50 : Math.max(400, Math.min(2000, lastMs * 12)));
+    const quiet = performance.now() - state.touchAt;
+    let wait;
+    if (quiet < TOUCH_HOLD) wait = TOUCH_HOLD - quiet + 50;
+    else {
+      if (!document.hidden && screenOn() && !(state.view === 'night' && state.nightAlpha > .99)) { advanceSky(); drawFrame(); }
+      const easing = ['cover', 'wet', 'rain'].some(k => state[k] !== WX[state.wx][k]); // weather changing: smaller, quicker steps
+      wait = easing ? Math.max(250, perf.ms * 3) : Math.max(C.skyInterval * 1000, perf.ms * 10);
+    }
+    if (alive) liveTimer = setTimeout(liveTick, wait);
+  }
+
+  // debug: true puts the real cost in the bottom-right corner
+  let longObs = null;
+  function debugTick() {
+    if (!C.debug) return;
+    const now = performance.now(); perf.busy = perf.busy.filter(b => now - b[0] < 60000);
+    const busy = perf.busy.reduce((s, b) => s + b[1], 0), span = Math.max(1000, Math.min(60000, now - perf.since));
+    const el = $('#dbg'); el.hidden = false;
+    el.textContent = `sky ${Math.round(perf.ms)} ms · card CPU ${(busy / span * 100).toFixed(1)}% · ${perf.full} full / ${perf.quick} text-only · page long tasks ${perf.long}, max ${Math.round(perf.longMax)} ms`;
   }
 
   // for checks from the browser console: document.querySelector(...)._debug in the dashboard
-  host._debug = { state, C, PAGES, render, applyView, sync: () => syncFromHass(true), page: i => goPage(i), act: k => ACTIONS[k](), live: t => { state.liveFreeze = t; }, skyM };
+  host._debug = { state, C, PAGES, perf, render, drawFrame, applyView, sync: () => syncFromHass(true), page: i => goPage(i), act: k => ACTIONS[k](), live: t => { state.liveFreeze = t; if (t != null) sky.t = t; else advanceSky(); frameSig = ''; }, tick: () => { advanceSky(); return drawFrame(); }, skyM };
 
   /* ---------- start and stop with the card ---------- */
   const fontsReady = Promise.race([Promise.all(['300 200px', '400 22px', '500 28px', '600 32px'].map(f => document.fonts.load(`${f} Figtree`))), new Promise(r => setTimeout(r, 2000))]);
   function start() {
     if (alive) return;
-    alive = true; lastStates = null; lastSig = '';
+    alive = true; lastStates = null; lastSig = ''; frameSig = ''; perf.since = performance.now();
     state.m = nowMin(); setTime(nowMin()); fit(); syncFromHass(true);
-    intervals.push(setInterval(() => setTime(nowMin()), 1000), setInterval(applyView, 500), setInterval(secondTick, 1000));
+    intervals.push(setInterval(() => setTime(nowMin()), 1000), setInterval(applyView, 500), setInterval(secondTick, 1000), setInterval(debugTick, 1000));
     liveTimer = setTimeout(liveTick, 1000);
     requestAnimationFrame(rainFrame);
     ro.observe(host);
-    fontsReady.then(() => requestRender(true));
+    if (C.debug && !longObs) try { longObs = new PerformanceObserver(l => l.getEntries().forEach(e => { perf.long++; perf.longMax = Math.max(perf.longMax, e.duration); })); longObs.observe({ type: 'longtask' }); } catch (e) { longObs = null; }
+    fontsReady.then(() => { frameSig = ''; requestRender(true); });
   }
   function stop() {
     alive = false;
     intervals.splice(0).forEach(clearInterval); clearTimeout(liveTimer); ro.disconnect();
+    if (longObs) { longObs.disconnect(); longObs = null; }
     unsubForecast(); fcEntity = '';
   }
   return { setHass(h) { hassRef = h; if (alive) syncFromHass(); }, start, stop };
@@ -1661,6 +1719,7 @@ function normalize(c) {
     mute: pick('mute', vaca('switch', 'mute')), dnd: pick('do_not_disturb', vaca('switch', 'do_not_disturb')),
     autoBrightness: pick('auto_brightness', vaca('switch', 'auto_brightness')), brightness: pick('brightness', vaca('number', 'screen_brightness')),
     volume: pick('volume', vaca('number', 'music_volume')), wakeWord: pick('wake_word', vaca('select', 'wake_word')),
+    screen: pick('screen', vaca('switch', 'screen')), debug: !!c.debug, skyInterval: Math.max(2, +c.sky_interval || 6),
   };
 }
 
