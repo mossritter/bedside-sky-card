@@ -1,7 +1,7 @@
-/*! Bedside Sky Card 1.1.0 | a bedside screen for Home Assistant and View Assist, made for the Echo Show 5 (960x480) | MIT License */
+/*! Bedside Sky Card 1.2.0 | a bedside screen for Home Assistant and View Assist, made for the Echo Show 5 (960x480) | MIT License */
 (() => {
 'use strict';
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const FONT_URL = 'https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700&display=swap';
 const STYLE = String.raw`  /* The card: the 960 x 480 screen scaled to fill the card, which keeps a 2:1 shape (full screen on an Echo Show 5). */
   :host { display: block; position: relative; width: 100%; aspect-ratio: 2 / 1; max-height: 100vh; overflow: hidden; background: #000; }
@@ -14,7 +14,7 @@ const STYLE = String.raw`  /* The card: the 960 x 480 screen scaled to fill the 
      right column (584 to 936) holds the glass. Nothing smaller than 22 px. */
   .scr { position: absolute; width: 960px; height: 480px; overflow: hidden; background: #000; border-radius: 0; font-family: "Figtree", system-ui, sans-serif;
          color: var(--ink); --ink: #FFFFFF; --ink2: rgba(255,255,255,.74); --track: rgba(255,255,255,.25); --accent: #8FC2FF; --alert: #FF8A8A; --inv: #141A2E; }
-  #bg, #bg2, #rain { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
+  #bg, #gl, #bg2, #rain { position: absolute; left: 0; top: 0; width: 100%; height: 100%; display: block; }
   #bg2, #rain { pointer-events: none; }
   #bg2 { opacity: 0; } /* holds the outgoing page's frame while it fades into the next one */
   .scr { touch-action: none; -webkit-user-select: none; user-select: none; } /* every touch is ours: swipes, holds, sliders */
@@ -725,7 +725,7 @@ function mount(root, host, C) {
   }
   function blurFrom(srcCanvas, srcData, w, h, r, sf) {
     if (!canFilter) return blurRGB(toRGB(srcData), w, h, r);
-    const hc = sf.h || (sf.h = makeCanvas(w >> 1, h >> 1)), hx = hc.getContext('2d'); hx.clearRect(0, 0, hc.width, hc.height);
+    const hc = sf.h || (sf.h = makeCanvas(w >> 1, h >> 1)), hx = hc.getContext('2d', { willReadFrequently: true }); hx.clearRect(0, 0, hc.width, hc.height);
     hx.filter = `blur(${(Math.sqrt(((2 * r + 1) ** 2 - 1) / 4) / 2).toFixed(2)}px)`; hx.drawImage(srcCanvas, 0, 0, hc.width, hc.height); hx.filter = 'none';
     const out = toRGB(hx.getImageData(0, 0, hc.width, hc.height).data); out.w = hc.width; out.h = hc.height; out.k = .5; return out;
   }
@@ -815,7 +815,7 @@ function mount(root, host, C) {
   const sky = { m: null, t: 0 };
   const advanceSky = () => { sky.m = skyM(state.m); sky.t = (performance.now() - T0) / 1000; };
   let frameSig = '', lastWall = null;
-  const perf = { full: 0, quick: 0, ms: 0, busy: [], since: 0, long: 0, longMax: 0 };
+  const perf = { full: 0, quick: 0, pre: 0, ms: 0, busy: [], since: 0, long: 0, longMax: 0 };
   const screenOn = () => { const s = C.screen && st(C.screen); return !s || s.state !== 'off'; };
   // Map the real time of day onto the sky's model day (sunrise at 6:00, sunset at 18:00).
   function skyM(m) {
@@ -832,7 +832,115 @@ function mount(root, host, C) {
   const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
   /* ---------- DOM ---------- */
-  const scr = $('#scr'), bg = $('#bg'), bctx = bg.getContext('2d', { willReadFrequently: true });
+  const scr = $('#scr'), bg = $('#bg');
+  let bctx = bg.getContext('2d', { willReadFrequently: true });
+
+  /* ---------- WebGL compositor (1.2.0) ----------
+     The sky is still painted with the 2D canvas. Blurring it, the shadows and the glass itself run on the GPU.
+     Falls back to the canvas path when WebGL is missing, software-only or lost, or with renderer: canvas. */
+  const GLX = (() => {
+    if (C.renderer === 'canvas') return null;
+    let cv, gl;
+    try { cv = makeCanvas(960, 480); gl = cv.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true, premultipliedAlpha: false }); } catch (e) { gl = null; }
+    if (!gl) return null;
+    const ri = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = String(ri ? gl.getParameter(ri.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    if (C.renderer !== 'webgl' && /swiftshader|llvmpipe|softpipe|software/i.test(name)) return null; // a software GPU is slower than the canvas path
+    const hp = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+    const head = `precision ${hp && hp.precision > 0 ? 'highp' : 'mediump'} float;varying vec2 v_px;uniform vec2 u_size;\n`;
+    const VS = 'attribute vec2 a;uniform vec4 u_rect;uniform vec2 u_size;uniform float u_flip;varying vec2 v_px;\n' +
+      'void main(){vec2 px=u_rect.xy+a*u_rect.zw;v_px=px;gl_Position=vec4(px.x/u_size.x*2.0-1.0,(1.0-px.y/u_size.y*2.0)*u_flip,0.0,1.0);}';
+    const WB = [.179, .162, .120, .0729, .0362, .0147, .0048]; // gaussian, sigma 2.24 at half size: the canvas path's blur
+    const FS = {
+      copy: head + 'uniform sampler2D u_t;void main(){gl_FragColor=vec4(texture2D(u_t,v_px/u_size).rgb,1.0);}',
+      blur: head + 'uniform sampler2D u_t;uniform vec2 u_d;void main(){vec2 uv=v_px/u_size;vec3 s=texture2D(u_t,uv).rgb*' + WB[0].toFixed(4) + ';' +
+        WB.slice(1).map((w, i) => `s+=(texture2D(u_t,uv+u_d*${(i + 1).toFixed(1)}).rgb+texture2D(u_t,uv-u_d*${(i + 1).toFixed(1)}).rgb)*${w.toFixed(4)};`).join('') + 'gl_FragColor=vec4(s,1.0);}',
+      base: head + 'uniform sampler2D u_sky;uniform sampler2D u_sh;uniform float u_k;void main(){vec2 uv=v_px/u_size;vec3 c=texture2D(u_sky,uv).rgb;vec4 s=texture2D(u_sh,uv);gl_FragColor=vec4(mix(c,s.rgb,s.a*u_k),1.0);}',
+      // the canvas path's glass(), line for line
+      glass: head + `uniform sampler2D u_b;uniform vec4 u_box;uniform float u_r;uniform vec4 u_p1;uniform vec4 u_p2;uniform vec4 u_tc;uniform vec2 u_vy;
+float sg(float v){return v<0.0?-1.0:1.0;}
+void main(){
+  vec2 P=v_px,X=P-u_box.xy,q=abs(X)-u_box.zw+u_r;float d;vec2 n;
+  if(q.x>0.0&&q.y>0.0){float l=length(q);d=l-u_r;n=vec2(q.x/l*sg(X.x),q.y/l*sg(X.y));}
+  else{d=max(q.x,q.y)-u_r;n=q.x>q.y?vec2(sg(X.x),0.0):vec2(0.0,sg(X.y));}
+  float cov=clamp(0.5-d,0.0,1.0);if(cov<=0.0)discard;
+  float dist=max(0.0,-d),t=min(1.0,dist/u_p1.x),u=1.0-t,f=u>0.0?pow(u,2.2):0.0;
+  vec3 c;
+  if(f>0.0){vec2 o=n*u_p1.y*f,s=P-o;c=vec3(texture2D(u_b,(s+o*0.1)/u_size).r,texture2D(u_b,s/u_size).g,texture2D(u_b,(s-o*0.1)/u_size).b);}
+  else c=texture2D(u_b,P/u_size).rgb;
+  c*=255.0;
+  float lum=dot(c,vec3(0.2126,0.7152,0.0722));c=lum+(c-lum)*u_p2.y;
+  c+=(u_tc.rgb-c)*u_tc.a;
+  c+=(255.0-c)*(u_p2.x+0.07*(1.0-(P.y-0.5-u_vy.x)/u_vy.y));
+  float ndl=-0.55*n.x-0.835*n.y,rimLine=max(0.0,1.0-dist/u_p1.z),soft=u*u*u;
+  c*=(1.0-(f*max(0.0,-ndl)*0.10+u_p2.z*soft))*u_p2.w;
+  float spec=soft*max(0.0,ndl)*0.18;
+  if(rimLine>0.0)spec+=rimLine*(0.22+0.78*pow(max(ndl,1e-6),1.4))+rimLine*max(0.0,-ndl)*0.35;
+  c+=(255.0-c)*min(1.0,spec*u_p1.w);
+  gl_FragColor=vec4(clamp(c/255.0,0.0,1.0),cov);
+}`,
+    };
+    const prog = {};
+    try {
+      const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+      const v = sh(gl.VERTEX_SHADER, VS);
+      for (const k in FS) {
+        const p = gl.createProgram(); gl.attachShader(p, v); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, FS[k])); gl.bindAttribLocation(p, 0, 'a'); gl.linkProgram(p);
+        if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+        prog[k] = { p, u: {} };
+      }
+    } catch (e) { console.warn('bedside-sky-card: WebGL off:', e.message); return null; }
+    const U = (pr, n) => pr.u[n] ?? (pr.u[n] = gl.getUniformLocation(pr.p, n));
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    const tex = (w, h) => {
+      const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]].forEach(([k, v]) => gl.texParameteri(gl.TEXTURE_2D, k, v));
+      if (w) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      return t;
+    };
+    const fbo = t => { const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0); return f; };
+    const tSky = tex(), tSh = tex(), tImg = tex(), tA = tex(480, 240), tB = tex(480, 240), fA = fbo(tA), fB = fbo(tB);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    const upload = (t, canvas) => { gl.bindTexture(gl.TEXTURE_2D, t); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas); };
+    const use = (k, texs) => { const pr = prog[k]; gl.useProgram(pr.p); texs.forEach(([n, t], i) => { gl.activeTexture(gl.TEXTURE0 + i); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(U(pr, n), i); }); return pr; };
+    // u_flip -1 draws into the half-size buffers top row first, so every texture reads top-down like the canvas
+    const quad = (pr, rect, size, flip) => { gl.uniform4f(U(pr, 'u_rect'), ...rect); gl.uniform2f(U(pr, 'u_size'), ...size); gl.uniform1f(U(pr, 'u_flip'), flip); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); };
+    const screen = () => { gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, 960, 480); gl.disable(gl.BLEND); };
+    let lost = false, shadowSrc = null, blurred = false;
+    cv.addEventListener('webglcontextlost', e => { e.preventDefault(); lost = true; onGLLost(); });
+    return {
+      cv, name, get ok() { return !lost; },
+      sky(canvas) { upload(tSky, canvas); blurred = false; },
+      shadows(canvas) { if (canvas !== shadowSrc) { upload(tSh, canvas); shadowSrc = canvas; } },
+      blur() {
+        if (blurred) return; blurred = true;
+        gl.disable(gl.BLEND); gl.viewport(0, 0, 480, 240);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fA); quad(use('copy', [['u_t', tSky]]), [0, 0, 480, 240], [480, 240], -1);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fB); let pr = use('blur', [['u_t', tA]]); gl.uniform2f(U(pr, 'u_d'), 1 / 480, 0); quad(pr, [0, 0, 480, 240], [480, 240], -1);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fA); pr = use('blur', [['u_t', tB]]); gl.uniform2f(U(pr, 'u_d'), 0, 1 / 240); quad(pr, [0, 0, 480, 240], [480, 240], -1);
+      },
+      base(withShadows) { screen(); const pr = use('base', [['u_sky', tSky], ['u_sh', tSh]]); gl.uniform1f(U(pr, 'u_k'), withShadows && shadowSrc ? 1 : 0); quad(pr, [0, 0, 960, 480], [960, 480], 1); },
+      glass(it, o) {
+        const pr = use('glass', [['u_b', tA]]), hw = it.w / 2, hh = it.h / 2, tc = o.tintColor || [0, 0, 0];
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.uniform4f(U(pr, 'u_box'), it.x + hw, it.y + hh, hw, hh); gl.uniform1f(U(pr, 'u_r'), Math.min(it.r, hw, hh));
+        gl.uniform4f(U(pr, 'u_p1'), o.bezel, o.refract, o.rimW ?? 2.2, o.rim ?? .8);
+        gl.uniform4f(U(pr, 'u_p2'), o.tint ?? .12, o.sat ?? 1.1, o.edge ?? 0, 1 - (o.dim ?? 0));
+        gl.uniform4f(U(pr, 'u_tc'), tc[0], tc[1], tc[2], o.tintColor ? (o.tintMix ?? 0) : 0);
+        gl.uniform2f(U(pr, 'u_vy'), it.y, it.h);
+        const x0 = Math.floor(it.x) - 1, y0 = Math.floor(it.y) - 1;
+        quad(pr, [x0, y0, Math.ceil(it.x + it.w) + 1 - x0, Math.ceil(it.y + it.h) + 1 - y0], [960, 480], 1);
+      },
+      blit(canvas) { upload(tImg, canvas); screen(); quad(use('copy', [['u_t', tImg]]), [0, 0, 960, 480], [960, 480], 1); },
+      clear() { screen(); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); },
+    };
+  })();
+  let outCanvas = bg; // what's on screen: the WebGL canvas, or the 2D one
+  if (GLX) { GLX.cv.id = 'gl'; GLX.cv.setAttribute('aria-hidden', 'true'); bg.after(GLX.cv); bg.style.display = 'none'; outCanvas = GLX.cv; }
+  const useGL = () => !!GLX && GLX.ok;
+  function onGLLost() { bg.style.display = ''; outCanvas = bg; frameSig = ''; staleShown = null; requestRender(true); }
   const night = $('#night');
   const radii = new WeakMap(); // corner radii don't change, so getComputedStyle runs once per element
   const radiusOf = el => { let r = radii.get(el); if (r == null) { r = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0; radii.set(el, r); } return r; };
@@ -977,28 +1085,67 @@ function mount(root, host, C) {
     }
     return (lastInk = fresh);
   }
-  /* ---------- main render ---------- */
-  function render() {
-    if (sky.m == null) advanceSky();
-    const o = state.lay, { W, H } = DIMS[o], P = frameAt(sky.m);
-    state.P = P;
-    if (bg.width !== W || bg.height !== H) { bg.width = W; bg.height = H; }
-    syncText(); updateNight();
-    // Deep night: the overlay is solid black, so don't spend anything on the sky.
-    if (state.view === 'night' && state.nightAlpha > .99) { bctx.fillStyle = '#000'; bctx.fillRect(0, 0, W, H); frameSig = ''; return false; }
-    const items = collectGlass(); glassNow = items; // the rain layer stays off these
-    const moonA = SKYGEO[o].moon, band = [moonA.cx - moonA.rx - 70, moonA.cx + moonA.rx + 70];
-    const floor = Math.min(H, ...items.filter(it => !it.el.closest('.sb') && it.x < band[1] && it.x + it.w > band[0]).map(it => it.y));
-    const avoid = inkTextRects();
-    const wx = weatherNow();
-    const geo = { ...SKYGEO[o], moonFloor: floor, avoid, wx, sig: wx.sig + '|' + floor + ':' + avoid.map(r => `${r.x},${r.y},${r.w},${r.h}`).join(';') };
-    const wall = getWall(o, P, sky.m, geo); lastWall = wall;
-    // Same sky, same glass, same text boxes: the canvas would come out identical, so only the text was updated.
-    const fsig = sky.m.toFixed(2) + '|' + geo.sig + '#' + items.map(it => `${it.x},${it.y},${it.w},${it.h},${it.kind},${it.on ? 1 : 0}`).join(';');
-    if (fsig === frameSig) { perf.quick++; return false; }
-    frameSig = fsig; perf.full++;
+  /* ---------- the WebGL path's sky: painted in 2D, read back only at quarter size for the ink and contrast ---------- */
+  let glWallKey = '', glWall = null, glSurf = null;
+  function getWallGL(o, P, m, geo) {
+    const key = o + '|' + m.toFixed(2) + '|' + geo.sig;
+    if (key === glWallKey && glWall) return glWall;
+    const { W, H } = DIMS[o];
+    if (!glSurf) { const p = makeCanvas(W, H), pr = makeCanvas(W >> 2, H >> 2); glSurf = { p, px: p.getContext('2d'), pr, prx: pr.getContext('2d', { willReadFrequently: true }) }; }
+    glSurf.px.setTransform(1, 0, 0, 1, 0, 0); paintWallpaper(glSurf.px, o, P, m, geo);
+    glSurf.prx.drawImage(glSurf.p, 0, 0, W >> 2, H >> 2);
+    glWallKey = key;
+    return (glWall = { gl: true, probe: glSurf.prx.getImageData(0, 0, W >> 2, H >> 2).data, pw: W >> 2, canvas: glSurf.p, ctx: glSurf.px, fresh: true });
+  }
+  // average luminance of a screen rectangle: from the whole wallpaper (canvas path) or the quarter-size probe (WebGL)
+  function wallLum(wall, x, y, w, h) {
+    if (!wall.gl) return areaLum(wall.im.data, DIMS.S.W, x, y, w, h);
+    const d = wall.probe, pw = wall.pw, ph = d.length / 4 / pw; let sum = 0, n = 0;
+    for (let py = Math.max(0, Math.floor(y / 4)); py < Math.min(ph, Math.ceil((y + h) / 4)); py++)
+      for (let px = Math.max(0, Math.floor(x / 4)); px < Math.min(pw, Math.ceil((x + w) / 4)); px++) { const i = (py * pw + px) * 4; sum += .2126 * LUT[d[i]] + .7152 * LUT[d[i + 1]] + .0722 * LUT[d[i + 2]]; n++; }
+    return n ? sum / n : 0;
+  }
+  // The glass's own brightness for the WebGL path, worked out from the probe: inside a pane it's the sky through the same
+  // saturation, tint, lift and dim as the shader (the rim and refraction only touch the edges).
+  function estGlassLums(wall, items, P, adj) {
+    const out = [], d = wall.probe, pw = wall.pw, ph = d.length / 4 / pw, L8 = v => LUT[Math.max(0, Math.min(255, Math.round(v)))];
+    items.forEach(it => {
+      if (it.kind !== 'glass' || it.el.classList.contains('dock')) return;
+      const o = optsFor(it, P, adj), ins = Math.min(14, it.h * .2), zx = it.x + ins, zy = it.y + ins, zw = it.w - ins * 2, zh = it.h - ins * 2;
+      const tc = o.tintColor, tm = tc ? o.tintMix ?? 0 : 0, sat = o.sat ?? 1.1, keep = 1 - (o.dim ?? 0), tint = o.tint ?? .12;
+      let sum = 0, n = 0;
+      for (let py = Math.max(0, Math.floor(zy / 4)); py < Math.min(ph, Math.ceil((zy + zh) / 4)); py++) {
+        const lift = tint + .07 * (1 - (py * 4 + 2 - it.y) / it.h);
+        for (let px = Math.max(0, Math.floor(zx / 4)); px < Math.min(pw, Math.ceil((zx + zw) / 4)); px++) {
+          const i = (py * pw + px) * 4; let R = d[i], G = d[i + 1], B = d[i + 2];
+          const l = .2126 * R + .7152 * G + .0722 * B; R = l + (R - l) * sat; G = l + (G - l) * sat; B = l + (B - l) * sat;
+          if (tc) { R += (tc[0] - R) * tm; G += (tc[1] - G) * tm; B += (tc[2] - B) * tm; }
+          R = (R + (255 - R) * lift) * keep; G = (G + (255 - G) * lift) * keep; B = (B + (255 - B) * lift) * keep;
+          sum += .2126 * L8(R) + .7152 * L8(G) + .0722 * L8(B); n++;
+        }
+      }
+      out.push(n ? sum / n : 0);
+    });
+    return out;
+  }
+  // Text on bare sky is all large, so it needs 3:1. Where no single ink gets there, a soft halo darkens or lightens that patch.
+  function drawHalos(ctx, avoid, heads, ink) {
+    let halo = 0; const hit = [];
+    avoid.forEach((r, i) => {
+      if (contrast(ink.L, heads[i]) >= HEAD_T) return;
+      const v = l2s(heads[i]) / 255;
+      const a = ink.light ? clamp01((v - l2s(1.05 / (HEAD_T + .3) - .05) / 255) / (v - .05)) * 1.2
+                          : clamp01((l2s((HEAD_T + .3) * (ink.L + .05) - .05) / 255 - v) / (1 - v)) * 1.2;
+      if (a <= 0) return;
+      halo = Math.max(halo, a); hit.push(i);
+      ctx.save(); ctx.shadowColor = ink.light ? `rgba(10,14,32,${Math.min(.85, a)})` : `rgba(255,255,255,${Math.min(.85, a)})`;
+      ctx.shadowBlur = 44; ctx.shadowOffsetX = 10000; ctx.fillStyle = '#000';
+      rr(ctx, r.x - 10000 - 14, r.y - 10, r.w + 28, r.h + 20, 24); ctx.fill(); ctx.restore();
+    });
+    return { halo, hit };
+  }
+  function composeCanvas(o, wall, items, avoid, P, W, H) {
     bctx.putImageData(wall.im, 0, 0);
-    // no early return without glass: the day view still needs its ink picked
     bctx.drawImage(shadowLayer(o, items), 0, 0);
     const under = bctx.getImageData(0, 0, W, H);
     const heads = avoid.map(r => areaLum(wall.im.data, W, r.x, r.y, r.w, r.h));
@@ -1008,33 +1155,130 @@ function mount(root, host, C) {
     let lums = zones.map(z => areaLum(comp.data, W, ...z));
     if (minContrast(ink, lums) < TARGET) { adj = fixGlass(ink, lums); comp = paintGlass(under, wall, items, P, adj, W, H); lums = zones.map(z => areaLum(comp.data, W, ...z)); }
     bctx.putImageData(comp, 0, 0);
-    // Text on bare sky is all large, so it needs 3:1. Where no single ink gets there,
-    // a soft halo darkens or lightens just that patch.
-    let halo = 0;
-    avoid.forEach((r, i) => {
-      if (contrast(ink.L, heads[i]) >= HEAD_T) return;
-      const v = l2s(heads[i]) / 255;
-      const a = ink.light ? clamp01((v - l2s(1.05 / (HEAD_T + .3) - .05) / 255) / (v - .05)) * 1.2
-                          : clamp01((l2s((HEAD_T + .3) * (ink.L + .05) - .05) / 255 - v) / (1 - v)) * 1.2;
-      if (a <= 0) return;
-      halo = Math.max(halo, a);
-      bctx.save(); bctx.shadowColor = ink.light ? `rgba(10,14,32,${Math.min(.85, a)})` : `rgba(255,255,255,${Math.min(.85, a)})`;
-      bctx.shadowBlur = 44; bctx.shadowOffsetX = 10000; bctx.fillStyle = '#000';
-      rr(bctx, r.x - 10000 - 14, r.y - 10, r.w + 28, r.h + 20, 24); bctx.fill(); bctx.restore();
-    });
+    const { halo } = drawHalos(bctx, avoid, heads, ink);
     const final = halo ? bctx.getImageData(0, 0, W, H).data : wall.im.data;
     const heads2 = halo ? avoid.map(r => areaLum(final, W, r.x, r.y, r.w, r.h)) : heads;
+    return { ink, lums, adj, halo, heads2 };
+  }
+  function composeGL(o, wall, items, avoid, P, W, H) {
+    const heads = avoid.map(r => wallLum(wall, r.x, r.y, r.w, r.h));
+    const ink = stickyInk(heads.length ? heads : [wallLum(wall, 0, 0, W, H)], P);
+    let adj = { lift: 0, dim: 0 }, lums = estGlassLums(wall, items, P, adj);
+    if (minContrast(ink, lums) < TARGET) { adj = fixGlass(ink, lums); lums = estGlassLums(wall, items, P, adj); }
+    if (wall.fresh) { const h = drawHalos(wall.ctx, avoid, heads, ink); wall.halo = h.halo; wall.hit = h.hit; GLX.sky(wall.canvas); wall.fresh = false; }
+    GLX.shadows(shadowLayer(o, items)); GLX.blur(); GLX.base(true);
+    items.forEach(it => GLX.glass(it, optsFor(it, P, adj)));
+    return { ink, lums, adj, halo: wall.halo || 0, heads2: heads.map((h, i) => (wall.hit || []).includes(i) ? null : h) }; // null: haloed up to 3.3:1
+  }
+
+  /* ---------- finished frames, kept per page and sheet (1.2.0) ----------
+     When a frame is slow to draw (the canvas path on an Echo Show 5), a swipe or a sheet shows its last frame at once,
+     and the live tick dissolves a fresh one in a few seconds later. Pages not opened lately are drawn in the background. */
+  const frameCache = {};
+  let inkVars = {}, inkRedirect = false, renderKey = null, staleShown = null, preTick = 0;
+  const inkVar = (k, v) => { inkVars[k] = v; if (!inkRedirect) scr.style.setProperty(k, v); };
+  const viewKey = () => state.view === 'home' ? 'home:' + PAGES[state.page] : state.view;
+  const cacheable = k => /^home:|^fc$|^alarm$/.test(k);
+  const fastFrames = () => perf.ms > 0 && perf.ms < 120;
+  const itemsSigOf = items => items.map(it => `${it.x},${it.y},${it.w},${it.h},${it.kind},${it.on ? 1 : 0}`).join(';');
+  const slot = k => frameCache[k] || (frameCache[k] = { cv: makeCanvas(960, 480) });
+  const slotCtx = c => c.ctx || (c.ctx = c.cv.getContext('2d', { willReadFrequently: !useGL() }));
+  function cacheStore(key, isig, items, ink) {
+    if (!cacheable(key)) return;
+    const c = slot(key);
+    if (!(renderKey && !useGL())) slotCtx(c).drawImage(outCanvas, 0, 0); // a background frame on the canvas path was drawn straight into it
+    Object.assign(c, { vars: { ...inkVars }, ink, lastInk, isig, rects: items.map(({ x, y, w, h, r, kind }) => ({ x, y, w, h, r, kind })), m: sky.m, wx: state.wx, cover: state.cover, at: performance.now() });
+  }
+  function cacheValid(c, isig) {
+    if (!c || !c.vars || c.isig !== isig || c.wx !== state.wx || Math.abs(c.cover - state.cover) > .05 || performance.now() - c.at > 600000) return false;
+    return Math.abs(((sky.m - c.m) % DAY + DAY + 720) % DAY - 720) <= 4; // within a few minutes of sky
+  }
+  function showCached(key) {
+    const c = frameCache[key]; if (!c || sky.m == null) return false;
+    const isig = itemsSigOf(collectGlass());
+    if (!cacheValid(c, isig)) return false;
+    if (useGL()) GLX.blit(c.cv); else bctx.drawImage(c.cv, 0, 0);
+    Object.entries(c.vars).forEach(([k, v]) => scr.style.setProperty(k, v));
+    state.ink = c.ink; lastInk = c.lastInk; glassNow = c.rects;
+    staleShown = { key, isig }; frameSig = '';
+    syncText(); updateNight();
+    return true;
+  }
+  // the frame on screen came from the cache: fade a freshly drawn one over it
+  function dissolveRefresh() {
+    const ov = $('#bg2'), ox = ov.getContext('2d');
+    ox.clearRect(0, 0, 960, 480); ox.drawImage(outCanvas, 0, 0); ov.style.transition = 'none'; ov.style.opacity = '1';
+    staleShown = null; frameSig = ''; advanceSky(); drawFrame();
+    void ov.offsetWidth; ov.style.transition = 'opacity .6s ease'; ov.style.opacity = '0';
+  }
+  // the bare sky, on screen or into another canvas, while new glass is on its way
+  function bareSkyOut() { if (!lastWall) return; if (lastWall.gl) { if (useGL()) GLX.base(false); } else bctx.putImageData(lastWall.im, 0, 0); frameSig = ''; staleShown = null; }
+  function bareSkyTo(ctx) { if (!lastWall) return false; if (lastWall.gl) ctx.drawImage(lastWall.canvas, 0, 0); else ctx.putImageData(lastWall.im, 0, 0); return true; }
+  // Draw another page or sheet into its slot without showing it: it's laid out invisibly, drawn, and put back,
+  // all in one go so the screen never shows the in-between.
+  function preRender(key) {
+    const cur = viewKey(); if (key === cur || state.view !== 'home') return;
+    const [v, p] = key.split(':'), undo = [];
+    const keep = { frameSig, lastInk, ink: state.ink, P: state.P, glassNow, lastWall, bctx, inkVars, staleShown, view: state.view };
+    const show = el => { const h = el.hidden, vis = el.style.visibility; el.hidden = false; el.style.visibility = 'hidden'; undo.push(() => { el.hidden = h; el.style.visibility = vis; }); };
+    if (v === 'home') { const c = $(`.page[data-page="${PAGES[state.page]}"]`); c.classList.add('leaving'); undo.push(() => c.classList.remove('leaving')); show($(`.page[data-page="${p}"]`)); }
+    else { const hv = $('.view[data-view="home"]'); hv.hidden = true; undo.push(() => { hv.hidden = false; }); show($(`.view[data-view="${v}"]`)); state.view = v; }
+    const c = slot(key);
+    renderKey = key; inkRedirect = true; frameSig = ''; staleShown = null; if (c.lastInk) lastInk = c.lastInk;
+    if (!useGL()) bctx = slotCtx(c);
+    try { render(); }
+    finally {
+      state.view = keep.view; renderKey = null; inkRedirect = false; undo.reverse().forEach(f => f());
+      ({ frameSig, lastInk, glassNow, lastWall, bctx, inkVars, staleShown } = keep); state.ink = keep.ink; state.P = keep.P;
+      if (useGL()) { glWallKey = ''; const cc = frameCache[cur]; if (cc && cc.vars) GLX.blit(cc.cv); else frameSig = ''; }
+      syncText();
+    }
+  }
+  function maybePreRender() {
+    if (fastFrames() || !perf.ms || state.view !== 'home' || state.ringing || performance.now() - state.touchAt < 10000) return;
+    const keys = [...PAGES.map(p => 'home:' + p), 'fc', 'alarm'].filter(k => k !== viewKey());
+    if (++preTick % (keys.some(k => !frameCache[k]) ? 2 : 5)) return; // warm up every other tick, then one every ~30 s
+    keys.sort((a, b) => ((frameCache[a] || {}).at || 0) - ((frameCache[b] || {}).at || 0));
+    const t0 = performance.now(); preRender(keys[0]); perf.pre++; perf.busy.push([t0, performance.now() - t0]);
+  }
+
+  /* ---------- main render ---------- */
+  function render() {
+    if (sky.m == null) advanceSky();
+    const o = state.lay, { W, H } = DIMS[o], P = frameAt(sky.m);
+    state.P = P;
+    if (bg.width !== W || bg.height !== H) { bg.width = W; bg.height = H; }
+    syncText(); updateNight();
+    // Deep night: the overlay is solid black, so don't spend anything on the sky.
+    if (state.view === 'night' && state.nightAlpha > .99) { if (useGL()) GLX.clear(); else { bctx.fillStyle = '#000'; bctx.fillRect(0, 0, W, H); } frameSig = ''; staleShown = null; return false; }
+    const items = collectGlass(); glassNow = items; // the rain layer stays off these
+    const moonA = SKYGEO[o].moon, band = [moonA.cx - moonA.rx - 70, moonA.cx + moonA.rx + 70];
+    const floor = Math.min(H, ...items.filter(it => !it.el.closest('.sb') && it.x < band[1] && it.x + it.w > band[0]).map(it => it.y));
+    const avoid = inkTextRects();
+    const wx = weatherNow();
+    const geo = { ...SKYGEO[o], moonFloor: floor, avoid, wx, sig: wx.sig + '|' + floor + ':' + avoid.map(r => `${r.x},${r.y},${r.w},${r.h}`).join(';') };
+    const wall = useGL() ? getWallGL(o, P, sky.m, geo) : getWall(o, P, sky.m, geo); lastWall = wall;
+    const isig = itemsSigOf(items), rkey = renderKey || viewKey();
+    // a kept frame is on screen: it stays until the live tick replaces it, unless the glass itself changed
+    if (staleShown && staleShown.key === rkey && staleShown.isig === isig) { perf.quick++; return false; }
+    staleShown = null;
+    // Same sky, same glass, same text boxes: the frame would come out identical, so only the text was updated.
+    const fsig = sky.m.toFixed(2) + '|' + geo.sig + '#' + isig;
+    if (fsig === frameSig) { perf.quick++; return false; }
+    frameSig = fsig; perf.full++;
+    const { ink, lums, adj, halo, heads2 } = useGL() ? composeGL(o, wall, items, avoid, P, W, H) : composeCanvas(o, wall, items, avoid, P, W, H);
     ink.halo = halo;
-    ink.head = heads2.length ? Math.min(...heads2.map(b => contrast(ink.L, b))) : 21; ink.glass = minContrast(ink, lums); ink.adj = adj;
+    ink.head = heads2.length ? Math.min(...heads2.map(b => b == null ? HEAD_T : contrast(ink.L, b))) : 21; ink.glass = minContrast(ink, lums); ink.adj = adj;
     ink.score = Math.min(ink.head, ink.glass);
-    state.ink = ink;
-    scr.style.setProperty('--ink', css(ink.fg));
-    scr.style.setProperty('--ink2', rgba(ink.fg2, ink.fg2a));
-    scr.style.setProperty('--track', rgba(ink.fg, .25));
-    scr.style.setProperty('--accent', ink.light ? '#8FC2FF' : '#1F5FD1');
-    scr.style.setProperty('--alert', ink.light ? '#FF8A8A' : '#C62828');
-    scr.style.setProperty('--inv', ink.light ? '#141A2E' : '#FFFFFF');
-    scr.style.setProperty('--warn', ink.light ? '255,194,77' : '214,134,10');
+    state.ink = ink; inkVars = {};
+    inkVar('--ink', css(ink.fg));
+    inkVar('--ink2', rgba(ink.fg2, ink.fg2a));
+    inkVar('--track', rgba(ink.fg, .25));
+    inkVar('--accent', ink.light ? '#8FC2FF' : '#1F5FD1');
+    inkVar('--alert', ink.light ? '#FF8A8A' : '#C62828');
+    inkVar('--inv', ink.light ? '#141A2E' : '#FFFFFF');
+    inkVar('--warn', ink.light ? '255,194,77' : '214,134,10');
+    cacheStore(rkey, isig, items, ink);
     return true;
   }
   const DAYNAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -1215,22 +1459,23 @@ function mount(root, host, C) {
     const from = $(`.page[data-page="${PAGES[state.page]}"]`), to = $(`.page[data-page="${PAGES[i]}"]`);
     clearTimeout(pageTimer); $$('.page').forEach(p => { if (p !== from) { p.classList.remove('leaving'); p.style.cssText = ''; if (p !== to) p.hidden = true; } });
     const ov = $('#bg2'), ox = ov.getContext('2d');
-    ox.clearRect(0, 0, 960, 480); ox.drawImage(bg, 0, 0);
+    ox.clearRect(0, 0, 960, 480); ox.drawImage(outCanvas, 0, 0);
     ov.style.transition = 'none'; ov.style.opacity = '1';
     clearTimeout(glassTimer);
-    if (lastWall) { bctx.putImageData(lastWall.im, 0, 0); frameSig = ''; }
     from.classList.add('leaving'); from.style.transition = 'none';
     to.hidden = false; to.style.transition = 'none'; to.style.opacity = '0'; to.style.transform = `translateX(${dir * 36}px)`;
     state.page = i; state.cmenu = false; state.amenu = false; state.touchAt = performance.now();
     if (PAGES[i] === 'cams') camTick(true);
-    syncText();
+    // The new page's glass: drawn now when frames are quick, else its kept frame, else it dissolves in once drawn.
+    // The slide never waits for a slow frame.
+    const how = fastFrames() ? (drawFrame(), 'drawn') : showCached(viewKey()) ? 'kept' : (bareSkyOut(), syncText(), 'later');
     void to.offsetWidth; // commit the start positions before animating
     const T = 'opacity .3s ease, transform .3s ease';
     to.style.transition = T; to.style.opacity = '1'; to.style.transform = 'none';
     from.style.transition = T; from.style.opacity = '0'; from.style.transform = `translateX(${-dir * 36}px)`;
-    ov.style.transition = 'opacity .22s ease'; ov.style.opacity = '0';
-    glassTimer = setTimeout(() => {
-      if (lastWall) { ox.putImageData(lastWall.im, 0, 0); ov.style.transition = 'none'; ov.style.opacity = '1'; }
+    ov.style.transition = how === 'later' ? 'opacity .22s ease' : 'opacity .3s ease'; ov.style.opacity = '0';
+    if (how === 'later') glassTimer = setTimeout(() => {
+      if (bareSkyTo(ox)) { ov.style.transition = 'none'; ov.style.opacity = '1'; }
       drawFrame();
       void ov.offsetWidth; ov.style.transition = 'opacity .25s ease'; ov.style.opacity = '0';
     }, 240);
@@ -1256,7 +1501,8 @@ function mount(root, host, C) {
     const t0 = new Date(); t0.setHours(0, 0, 0, 0);
     const days = state.daily.filter(f => Date.parse(f.datetime) >= +t0).slice(0, 5).map(f => {
       const d = new Date(f.datetime);
-      return { label: d.toDateString() === today ? 'Today' : d.toLocaleDateString(C.locale, { weekday: 'short' }), icon: iconOf(f.condition), hi: f.temperature, lo: f.templow, precip: f.precipitation };
+      const isToday = d.toDateString() === today; // today's column uses the high and low kept for the whole day
+      return { label: isToday ? 'Today' : d.toLocaleDateString(C.locale, { weekday: 'short' }), icon: iconOf(f.condition), hi: isToday && state.hi != null ? state.hi : f.temperature, lo: isToday && state.lo != null ? state.lo : f.templow, precip: f.precipitation };
     });
     return { now: { icon: wxIcon(m), temp: state.out, name: state.wxName, hi: state.hi, lo: state.lo, precip: state.precip }, hours, days };
   }
@@ -1289,7 +1535,9 @@ function mount(root, host, C) {
     $('#sb').hidden = true; // the alarm sheet now covers the top too
     $('#toast').classList.toggle('dim', v === 'night');
     if (v !== 'night') state.wokenUntil = 0;
-    requestRender(true);
+    // the forecast, the alarm sheet and the pages: drawn at once when frames are quick, else their kept frame
+    if (v === 'home' || v === 'fc' || v === 'alarm') { if (fastFrames()) drawFrame(); else if (!showCached(viewKey())) requestRender(true); }
+    else requestRender(true);
   }
   function applyView() {
     const now = performance.now();
@@ -1489,10 +1737,7 @@ function mount(root, host, C) {
         const u = h.connection.subscribeMessage(msg => {
           const f = msg.forecast || [];
           if (type === 'hourly') state.hourly = f;
-          else {
-            state.daily = f; const d = f[0];
-            state.hi = d ? d.temperature ?? null : null; state.lo = d ? d.templow ?? null : null; state.precip = d ? d.precipitation ?? null : null;
-          }
+          else { state.daily = f; todayHiLo(); }
           requestRender(true);
         }, { type: 'weather/subscribe_forecast', forecast_type: type, entity_id: C.weather });
         fcUnsubs.push(u); Promise.resolve(u).catch(() => { fcEntity = ''; });
@@ -1500,6 +1745,34 @@ function mount(root, host, C) {
     });
   }
   function unsubForecast() { fcUnsubs.splice(0).forEach(u => Promise.resolve(u).then(f => f && f()).catch(() => {})); }
+  // Today's high and low. The daily forecast for today only covers the hours that are left (Met.no does this), so its
+  // high falls through the afternoon. Keep the highest and lowest seen today: the forecast's, the readings, and HA's
+  // history since midnight (so a reload doesn't forget the morning).
+  const DAYSTORE = STORE + ':today';
+  let dayT = (() => { try { return JSON.parse(localStorage.getItem(DAYSTORE) || 'null') || {}; } catch (e) { return {}; } })(), histDay = '';
+  function noteToday(vals) {
+    const d = new Date().toDateString();
+    if (dayT.d !== d) dayT = { d, hi: null, lo: null };
+    let ch = false;
+    vals.forEach(v => { if (v == null || v === '') return; v = +v; if (!isFinite(v)) return; if (dayT.hi == null || v > dayT.hi) { dayT.hi = v; ch = true; } if (dayT.lo == null || v < dayT.lo) { dayT.lo = v; ch = true; } });
+    if (ch) try { localStorage.setItem(DAYSTORE, JSON.stringify(dayT)); } catch (e) {}
+  }
+  function todayHiLo() {
+    const d0 = state.daily[0], today = !!d0 && new Date(d0.datetime).toDateString() === new Date().toDateString();
+    noteToday([state.out, today ? d0.temperature : null, today ? d0.templow : null]);
+    const known = today || dayT.hist; // until the forecast or the history is in, a lone reading isn't a high and low
+    state.hi = known ? dayT.hi : null; state.lo = known ? dayT.lo : null;
+    state.precip = today ? d0.precipitation ?? null : null;
+  }
+  function loadTodayHistory(h) {
+    const d = new Date().toDateString(); if (histDay === d || !C.weather || !h.callWS) return; histDay = d;
+    const start = new Date(); start.setHours(0, 0, 0, 0);
+    try {
+      Promise.resolve(h.callWS({ type: 'history/history_during_period', start_time: start.toISOString(), entity_ids: [C.weather], minimal_response: false, no_attributes: false, significant_changes_only: false }))
+        .then(r => { noteToday(((r && r[C.weather]) || []).map(x => (x.a || x.attributes || {}).temperature)); dayT.hist = dayT.hi != null; todayHiLo(); requestRender(true); })
+        .catch(() => { histDay = ''; });
+    } catch (e) { histDay = ''; }
+  }
   function nextEvent(c) {
     const a = c.attributes; if (!a.start_time) return null;
     const s = new Date(String(a.start_time).replace(' ', 'T')), now = new Date();
@@ -1544,6 +1817,7 @@ function mount(root, host, C) {
       let [k, name] = COND[w.state] || ['partly', w.state];
       if (w.state === 'cloudy' && w.attributes.cloud_coverage >= 90) { k = 'overcast'; name = 'Overcast'; } // HA has no overcast state
       state.wx = k; state.wxName = name; state.out = w.attributes.temperature ?? null;
+      todayHiLo(); loadTodayHistory(h);
       if (fcEntity !== C.weather) subscribeForecast(h);
     }
     const sun = S[C.sun];
@@ -1647,7 +1921,7 @@ function mount(root, host, C) {
     let wait;
     if (quiet < TOUCH_HOLD) wait = TOUCH_HOLD - quiet + 50;
     else {
-      if (!document.hidden && screenOn() && !(state.view === 'night' && state.nightAlpha > .99)) { advanceSky(); drawFrame(); }
+      if (!document.hidden && screenOn() && !(state.view === 'night' && state.nightAlpha > .99)) { if (staleShown) dissolveRefresh(); else { advanceSky(); drawFrame(); } maybePreRender(); }
       const easing = ['cover', 'wet', 'rain'].some(k => state[k] !== WX[state.wx][k]); // weather changing: smaller, quicker steps
       wait = easing ? Math.max(250, perf.ms * 3) : Math.max(C.skyInterval * 1000, perf.ms * 10);
     }
@@ -1661,11 +1935,11 @@ function mount(root, host, C) {
     const now = performance.now(); perf.busy = perf.busy.filter(b => now - b[0] < 60000);
     const busy = perf.busy.reduce((s, b) => s + b[1], 0), span = Math.max(1000, Math.min(60000, now - perf.since));
     const el = $('#dbg'); el.hidden = false;
-    el.textContent = `sky ${Math.round(perf.ms)} ms · card CPU ${(busy / span * 100).toFixed(1)}% · ${perf.full} full / ${perf.quick} text-only · page long tasks ${perf.long}, max ${Math.round(perf.longMax)} ms`;
+    el.textContent = `${useGL() ? 'webgl' : 'canvas'} ${Math.round(perf.ms)} ms · kept ${Object.keys(frameCache).length} (${perf.pre} ahead) · card CPU ${(busy / span * 100).toFixed(1)}% · ${perf.full} full / ${perf.quick} text-only · page long tasks ${perf.long}, max ${Math.round(perf.longMax)} ms`;
   }
 
   // for checks from the browser console: document.querySelector(...)._debug in the dashboard
-  host._debug = { state, C, PAGES, perf, render, drawFrame, applyView, sync: () => syncFromHass(true), page: i => goPage(i), act: k => ACTIONS[k](), live: t => { state.liveFreeze = t; if (t != null) sky.t = t; else advanceSky(); frameSig = ''; }, tick: () => { advanceSky(); return drawFrame(); }, skyM };
+  host._debug = { state, C, PAGES, perf, render, drawFrame, frames: frameCache, preRender, viewKey, kept: () => staleShown, gl: () => useGL() && GLX.name, out: () => outCanvas, today: () => dayT, applyView, sync: () => syncFromHass(true), page: i => goPage(i), act: k => ACTIONS[k](), live: t => { state.liveFreeze = t; if (t != null) sky.t = t; else advanceSky(); frameSig = ''; }, tick: () => { advanceSky(); return drawFrame(); }, skyM };
 
   /* ---------- start and stop with the card ---------- */
   const fontsReady = Promise.race([Promise.all(['300 200px', '400 22px', '500 28px', '600 32px'].map(f => document.fonts.load(`${f} Figtree`))), new Promise(r => setTimeout(r, 2000))]);
@@ -1720,6 +1994,7 @@ function normalize(c) {
     autoBrightness: pick('auto_brightness', vaca('switch', 'auto_brightness')), brightness: pick('brightness', vaca('number', 'screen_brightness')),
     volume: pick('volume', vaca('number', 'music_volume')), wakeWord: pick('wake_word', vaca('select', 'wake_word')),
     screen: pick('screen', vaca('switch', 'screen')), debug: !!c.debug, skyInterval: Math.max(2, +c.sky_interval || 6),
+    renderer: ['canvas', 'webgl'].includes(one(c.renderer)) ? one(c.renderer) : 'auto',
   };
 }
 
