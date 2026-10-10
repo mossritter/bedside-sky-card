@@ -2,7 +2,7 @@
 
 A bedside screen for Home Assistant, made for a 960×480 [View Assist](https://github.com/dinki/View-Assist) display such as a jailbroken Echo Show 5.
 
-It shows a big clock over a live sky that follows the real sunrise, sunset and weather, with drifting clouds and rain. Swipe sideways for more pages:
+It shows a big clock over a live sky that follows the real sunrise, sunset and weather, with drifting clouds and rain. Swipe sideways for more pages. The page follows your finger, glass and all, and goes round like a carousel (past the last page is the first):
 
 - **Home:** clock, date and weather, Today card, ceiling light and alerts.
 - **House:** lights, room climate, laundry, leak sensors and shopping list.
