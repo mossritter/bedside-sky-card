@@ -88,18 +88,20 @@ Every option can be left out. A page with nothing set up is hidden.
 | `id` | Keeps the alarm days separate when two cards share a browser. |
 | `screen` | Switch that is off while the display's screen is off (filled in by `device`). Nothing is drawn while it's off. |
 | `sky_interval` | Seconds between sky redraws, default 6. The clouds drift about 20 px a minute, so each step is a pixel or two. |
-| `debug` | `true` shows what the card costs in the bottom-right corner: time per sky redraw, the card's share of the CPU, and the page's long tasks. |
+| `debug` | `true` shows what the card costs in the bottom-right corner: the renderer and its time per sky redraw, how many frames are kept, the card's share of the CPU, and the page's long tasks. |
+| `renderer` | `auto` (default) uses WebGL when the device has a real GPU, and the 2D canvas otherwise. `webgl` or `canvas` forces one. |
 
 ## Notes
 
 - The alarm rings on screen only. Sound is not wired up yet.
 - **Sounds** and the ceiling light presets are placeholders.
 - The sky is drawn on the device, so the card keeps that work small:
-  - The clouds and the glass blur are drawn at half resolution.
-  - The sky moves on every few seconds.
-  - Nothing is redrawn for 3 seconds after a touch.
+  - With WebGL, blurring the sky, the shadows and the glass run on the GPU.
+  - Without it, the clouds and the glass blur are drawn at half resolution.
+  - The sky moves on every few seconds, and nothing is redrawn for 3 seconds after a touch.
   - Text-only changes don't redraw the sky.
-  - Page swipes start before the new glass is drawn.
+  - When frames are slow, each page and sheet keeps its last frame, so swipes and the forecast show their glass at once. A fresh frame fades in a few seconds later. Pages not opened lately are drawn ahead in the background.
+- **Today's high and low:** these are the highest and lowest seen all day, from the forecast, the readings and HA's history since midnight. Some forecasts (Met.no) only cover the hours left in today, so their high drops through the afternoon.
 - To mute the mic, use a gesture: an automation can toggle `switch.vaca_<device>_mute` on a two-finger swipe down (`event.vaca_<device>_gesture`). One-finger swipes stay free for the pages.
 
 MIT License.
