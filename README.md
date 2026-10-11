@@ -90,6 +90,7 @@ Every option can be left out. A page with nothing set up is hidden.
 | `sky_interval` | Seconds between sky redraws, default 6. The clouds drift about 20 px a minute, so each step is a pixel or two. |
 | `debug` | `true` shows what the card costs in the bottom-right corner: the renderer and its time per sky redraw, how many frames are kept, the card's share of the CPU, and the page's long tasks. |
 | `renderer` | `auto` (default) uses WebGL when the device has a real GPU, and the 2D canvas otherwise. `webgl` or `canvas` forces one. |
+| `perf_log` | `true` writes each swipe's numbers (frames per second, worst gap, start cost) to Home Assistant's log (Settings → System → Logs), to see how the real device copes. Leave it off otherwise. |
 
 ## Notes
 
