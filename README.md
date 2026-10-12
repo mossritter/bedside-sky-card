@@ -90,6 +90,7 @@ Every option can be left out. A page with nothing set up is hidden.
 | `sky_interval` | Seconds between sky redraws, default 6. The clouds drift about 20 px a minute, so each step is a pixel or two. |
 | `debug` | `true` shows what the card costs in the bottom-right corner: the renderer and its time per sky redraw, how many frames are kept, the card's share of the CPU, and the page's long tasks. |
 | `renderer` | `auto` (default) uses WebGL when the device has a real GPU, and the 2D canvas otherwise. `webgl` or `canvas` forces one. |
+| `live_glass` | `auto` (default): with WebGL, the glass is drawn live while you swipe, so the panes slide over the sky and bend what is behind them. The card times its own swipes and, if the device can't keep up (under about 50 fps), goes back to sliding still pictures of the panes and remembers that. `on` keeps it live, `off` always uses the still pictures. Without WebGL the pictures are always used. |
 | `perf_log` | `true` writes each swipe's numbers (frames per second, worst gap, start cost) to Home Assistant's log (Settings → System → Logs), to see how the real device copes. Leave it off otherwise. |
 
 ## Notes
@@ -97,7 +98,7 @@ Every option can be left out. A page with nothing set up is hidden.
 - The alarm rings on screen only. Sound is not wired up yet.
 - **Sounds** and the ceiling light presets are placeholders.
 - The sky is drawn on the device, so the card keeps that work small:
-  - With WebGL, blurring the sky, the shadows and the glass run on the GPU.
+  - With WebGL, blurring the sky, the shadows and the glass run on the GPU. While you swipe, only the glass and shadows are redrawn, over a copy of the sky kept on the GPU.
   - Without it, the clouds and the glass blur are drawn at half resolution.
   - The sky moves on every few seconds, and nothing is redrawn for 3 seconds after a touch.
   - Text-only changes don't redraw the sky.
